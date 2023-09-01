@@ -1,10 +1,13 @@
-use std::io::{stdout, Write};
+use std::{
+    fmt::{self, Display, Formatter},
+    io::{stdout, Write},
+};
 
 use crate::serial::SerialDevice;
 
 pub struct StdoutDevice {
     flush: bool,
-    callback: fn(image_buffer: &Vec<u8>),
+    callback: fn(buffer: &Vec<u8>),
 }
 
 impl StdoutDevice {
@@ -15,7 +18,7 @@ impl StdoutDevice {
         }
     }
 
-    pub fn set_callback(&mut self, callback: fn(image_buffer: &Vec<u8>)) {
+    pub fn set_callback(&mut self, callback: fn(buffer: &Vec<u8>)) {
         self.callback = callback;
     }
 }
@@ -37,10 +40,24 @@ impl SerialDevice for StdoutDevice {
     fn allow_slave(&self) -> bool {
         false
     }
+
+    fn description(&self) -> String {
+        String::from("Stdout")
+    }
+
+    fn state(&self) -> String {
+        String::from("")
+    }
 }
 
 impl Default for StdoutDevice {
     fn default() -> Self {
         Self::new(true)
+    }
+}
+
+impl Display for StdoutDevice {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Stdout")
     }
 }

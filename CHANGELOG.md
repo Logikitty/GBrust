@@ -19,6 +19,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 *
 
+## [0.9.14] - 2023-08-24
+
+### Added
+
+* XRGB8888 support for Libretro frontend, for better color fidelity and faster render
+* Support for save state - [#7](https://gitlab.stage.hive.pt/joamag/boytacean/-/issues/7)
+* LibRetro save state support - [#7](https://gitlab.stage.hive.pt/joamag/boytacean/-/issues/7)
+* Support for fast mode in SDL frontend
+* Support for GameShark cheat codes - [#33](https://gitlab.stage.hive.pt/joamag/boytacean/-/issues/33)
+
+### Changed
+
+* Made audio flush for libretro and sdl frontends flush by the end of the frame
+* Improved MBC5 to support 9 bit ROM bank addresses
+
+### Fixed
+
+* Breaking issue with Libretro frontend and Linux
+* Fix `window_counter` issue in PPU
+* Issue with BESS header testing
+
+## [0.9.13] - 2023-08-01
+
+### Changed
+
+* Improved command line parsing with positional ROM path value
+* Better CI/CD for releases
+* Hidden test panel in Web UI
+
+### Fixed
+
+* Small issue with command line arguments
+
+## [0.9.12] - 2023-08-01
+
+### Added
+
+* New WASM build
+
+## [0.9.11] - 2023-08-01
+
+### Fixed
+
+* Build of a new release
+
+## [0.9.10] - 2023-08-01
+
+### Fixed
+
+* Issue with release life-cycle
+
+## [0.9.9] - 2023-08-01
+
+### Fixed
+
+* Issue with release life-cycle
+
+## [0.9.8] - 2023-08-01
+
+### Added
+
+* Better release life-cycle
+
+## [0.9.7] - 2023-08-01
+
+### Added
+
+* Support for [Libretro](https://www.libretro.com/) core - [#14](https://gitlab.stage.hive.pt/joamag/boytacean/-/issues/14)
+
+## [0.9.6] - 2023-06-20
+
+### Added
+
+* Support for image based testing
+* Support for rumble, works for both mobile devices and Gamepads (web APIs)
+
+### Changed
+
+* Bumped emukit to 0.8.8
+
+### Fixed
+
+* CGB-ACID2 test passing - [#30](https://gitlab.stage.hive.pt/joamag/boytacean/-/issues/30)
+
+## [0.9.5] - 2023-06-05
+
+### Added
+
+* Support for the `clock_m()` function
+* Benchmark CLI option in SDL
+
+### Changed
+
+* Major performance improvements for the DMG specific code
+
+## [0.9.4] - 2023-06-04
+
+### Added
+
+* Support for displaying speed at which the CPU is running in Web mode, for debug purposes
+* Headless execution mode in Boytacean SDL
+* Many more parameters added for Boytacean SDL
+
+## [0.9.3] - 2023-05-18
+
+### Fixed
+
+* Small panic recovering issue
+
+## [0.9.2] - 2023-05-18
+
+### Added
+
+* Support for auto emulation mode selection
+
+## [0.9.1] - 2023-05-18
+
+### Added
+
+* Support for enabling and disabling audio channels
+
+### Fixed
+
+* Issue with CH2 envelope initialization
+
+## [0.9.0] - 2023-05-18
+
+### Added
+
+* Support for Game Boy Color (CGB) emulation! 🥳 - [#8](https://gitlab.stage.hive.pt/joamag/boytacean/-/issues/8)
+* Support for CLI params in Boytacean SDL
+* Support for `GameBoyConfig` structure that is passed to some comments
+* New `DMA` component
+
 ## [0.8.0] - 2023-04-20
 
 ### Added

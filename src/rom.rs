@@ -2,9 +2,16 @@ use core::fmt;
 use std::{
     cmp::max,
     fmt::{Display, Formatter},
+    vec,
 };
 
-use crate::{debugln, warnln};
+use crate::{
+    cheats::{genie::GameGenie, shark::GameShark},
+    debugln,
+    gb::GameBoyMode,
+    util::read_file,
+    warnln,
+};
 
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
@@ -13,6 +20,35 @@ pub const ROM_BANK_SIZE: usize = 16384;
 pub const RAM_BANK_SIZE: usize = 8192;
 
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MbcType {
+    NoMbc = 0x00,
+    Mbc1 = 0x01,
+    Mbc2 = 0x02,
+    Mbc3 = 0x03,
+    Mbc5 = 0x04,
+    Mbc6 = 0x05,
+    Mbc7 = 0x06,
+    Unknown = 0x07,
+}
+
+impl MbcType {
+    pub fn ram_bank_mask(&self) -> u8 {
+        match self {
+            MbcType::NoMbc => 0x00,
+            MbcType::Mbc1 => 0x03,
+            MbcType::Mbc2 => unimplemented!(),
+            MbcType::Mbc3 => 0x03,
+            MbcType::Mbc5 => 0x0f,
+            MbcType::Mbc6 => unimplemented!(),
+            MbcType::Mbc7 => unimplemented!(),
+            MbcType::Unknown => unimplemented!(),
+        }
+    }
+}
+
+#[cfg_attr(feature = "wasm", wasm_bindgen)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RomType {
     RomOnly = 0x00,
     Mbc1 = 0x01,
@@ -77,6 +113,28 @@ impl RomType {
             RomType::HuC3 => "HuC3",
             RomType::HuC1RamBattery => "HuC1 + RAM + BATTERY",
             RomType::Unknown => "Unknown",
+        }
+    }
+
+    pub fn mbc_type(&self) -> MbcType {
+        match self {
+            RomType::RomOnly => MbcType::NoMbc,
+            RomType::Mbc1 | RomType::Mbc1Ram | RomType::Mbc1RamBattery => MbcType::Mbc1,
+            RomType::Mbc2 | RomType::Mbc2Battery => MbcType::Mbc2,
+            RomType::Mbc3
+            | RomType::Mbc3Ram
+            | RomType::Mbc3RamBattery
+            | RomType::Mbc3TimerBattery
+            | RomType::Mbc3TimerRamBattery => MbcType::Mbc3,
+            RomType::Mbc5
+            | RomType::Mbc5Ram
+            | RomType::Mbc5RamBattery
+            | RomType::Mbc5Rumble
+            | RomType::Mbc5RumbleRam
+            | RomType::Mbc5RumbleRamBattery => MbcType::Mbc5,
+            RomType::Mbc6 => MbcType::Mbc6,
+            RomType::Mbc7SensorRumbleRamBattery => MbcType::Mbc7,
+            _ => MbcType::Unknown,
         }
     }
 }
@@ -144,6 +202,7 @@ pub enum RamSize {
     NoRam,
     Unused,
     Size8K,
+    Size16K,
     Size32K,
     Size64K,
     Size128K,
@@ -156,6 +215,7 @@ impl RamSize {
             RamSize::NoRam => "No RAM",
             RamSize::Unused => "Unused",
             RamSize::Size8K => "8 KB",
+            RamSize::Size16K => "16 KB",
             RamSize::Size32K => "32 KB",
             RamSize::Size128K => "128 KB",
             RamSize::Size64K => "64 KB",
@@ -168,6 +228,7 @@ impl RamSize {
             RamSize::NoRam => 0,
             RamSize::Unused => 0,
             RamSize::Size8K => 1,
+            RamSize::Size16K => 2,
             RamSize::Size32K => 4,
             RamSize::Size64K => 8,
             RamSize::Size128K => 16,
@@ -224,6 +285,13 @@ pub struct Cartridge {
     /// RAM and ROM access on the current cartridge.
     mbc: &'static Mbc,
 
+    /// The current memory handler in charge of handling the
+    /// memory access for the current cartridge.
+    /// Typically this is the same as the MBC, but to allow
+    /// memory patching (ex: Game Genie) we may need another
+    /// level of indirection.
+    handler: &'static Mbc,
+
     /// The number of ROM banks (of 8KB) that are available
     /// to the current cartridge, this is a computed value
     /// to allow improved performance.
@@ -246,10 +314,28 @@ pub struct Cartridge {
     /// control of memory access to avoid corruption.
     ram_enabled: bool,
 
-    // The final offset of the last character of the title
-    // that is considered to be non zero (0x0) so that a
-    // proper safe conversion to UTF-8 string can be done.
+    /// The final offset of the last character of the title
+    /// that is considered to be non zero (0x0) so that a
+    /// proper safe conversion to UTF-8 string can be done.
     title_offset: usize,
+
+    /// The current rumble state of the cartridge, this
+    /// boolean value controls if vibration is currently active.
+    rumble_active: bool,
+
+    /// Callback function to be called whenever there's a new
+    /// rumble vibration triggered or when it's disabled.
+    rumble_cb: fn(active: bool),
+
+    /// Optional reference to the Game Genie instance that
+    /// would be used for the "cheating" by patching the
+    /// current ROM's cartridge data.
+    game_genie: Option<GameGenie>,
+
+    /// Optional reference to the GameShark instance that
+    /// would be used for the "cheating" by patching the
+    /// current ROM's cartridge data.
+    game_shark: Option<GameShark>,
 }
 
 impl Cartridge {
@@ -258,12 +344,17 @@ impl Cartridge {
             rom_data: vec![],
             ram_data: vec![],
             mbc: &NO_MBC,
+            handler: &NO_MBC,
             rom_bank_count: 0,
             ram_bank_count: 0,
             rom_offset: 0x4000,
             ram_offset: 0x0000,
             ram_enabled: false,
             title_offset: 0x0143,
+            rumble_active: false,
+            rumble_cb: |_| {},
+            game_genie: None,
+            game_shark: None,
         }
     }
 
@@ -273,12 +364,17 @@ impl Cartridge {
         cartridge
     }
 
+    pub fn from_file(path: &str) -> Self {
+        let data = read_file(path).unwrap();
+        Self::from_data(&data)
+    }
+
     pub fn read(&self, addr: u16) -> u8 {
         match addr & 0xf000 {
             0x0000 | 0x1000 | 0x2000 | 0x3000 | 0x4000 | 0x5000 | 0x6000 | 0x7000 => {
-                (self.mbc.read_rom)(self, addr)
+                (self.handler.read_rom)(self, addr)
             }
-            0xa000 | 0xb000 => (self.mbc.read_ram)(self, addr),
+            0xa000 | 0xb000 => (self.handler.read_ram)(self, addr),
             _ => {
                 debugln!("Reading from unknown Cartridge control 0x{:04x}", addr);
                 0x00
@@ -289,11 +385,32 @@ impl Cartridge {
     pub fn write(&mut self, addr: u16, value: u8) {
         match addr & 0xf000 {
             0x0000 | 0x1000 | 0x2000 | 0x3000 | 0x4000 | 0x5000 | 0x6000 | 0x7000 => {
-                (self.mbc.write_rom)(self, addr, value)
+                (self.handler.write_rom)(self, addr, value)
             }
-            0xa000 | 0xb000 => (self.mbc.write_ram)(self, addr, value),
+            0xa000 | 0xb000 => (self.handler.write_ram)(self, addr, value),
             _ => debugln!("Writing to unknown Cartridge address 0x{:04x}", addr),
         }
+    }
+
+    pub fn reset(&mut self) {
+        self.rom_data = vec![];
+        self.ram_data = vec![];
+        self.mbc = &NO_MBC;
+        self.rom_bank_count = 0;
+        self.ram_bank_count = 0;
+        self.rom_offset = 0x4000;
+        self.ram_offset = 0x0000;
+        self.ram_enabled = false;
+        self.title_offset = 0x0143;
+        self.rumble_active = false;
+        self.rumble_cb = |_| {};
+    }
+
+    pub fn vblank(&mut self) -> Option<Vec<(u16, u16, u8)>> {
+        if let Some(game_shark) = &mut self.game_shark {
+            return Some(game_shark.writes());
+        }
+        None
     }
 
     pub fn data(&self) -> &Vec<u8> {
@@ -327,12 +444,43 @@ impl Cartridge {
         }
     }
 
-    pub fn set_rom_bank(&mut self, rom_bank: u8) {
-        self.rom_offset = rom_bank as usize * ROM_BANK_SIZE;
+    pub fn has_rumble(&mut self) -> bool {
+        matches!(
+            self.rom_type(),
+            RomType::Mbc5Rumble | RomType::Mbc5RumbleRam | RomType::Mbc5RumbleRamBattery
+        )
+    }
+
+    pub fn ram_enabled(&self) -> bool {
+        self.ram_enabled
+    }
+
+    pub fn set_ram_enabled(&mut self, ram_enabled: bool) {
+        self.ram_enabled = ram_enabled
+    }
+
+    pub fn ram_bank(&self) -> u8 {
+        (self.ram_offset / RAM_BANK_SIZE) as u8
     }
 
     pub fn set_ram_bank(&mut self, ram_bank: u8) {
         self.ram_offset = ram_bank as usize * RAM_BANK_SIZE;
+    }
+
+    pub fn rom_bank(&self) -> u16 {
+        (self.rom_offset / ROM_BANK_SIZE) as u16
+    }
+
+    pub fn set_rom_bank(&mut self, rom_bank: u16) {
+        self.rom_offset = rom_bank as usize * ROM_BANK_SIZE;
+    }
+
+    pub fn set_rumble_cb(&mut self, rumble_cb: fn(active: bool)) {
+        self.rumble_cb = rumble_cb;
+    }
+
+    pub fn trigger_rumble(&self) {
+        (self.rumble_cb)(self.rumble_active);
     }
 
     fn set_data(&mut self, data: &[u8]) {
@@ -349,6 +497,7 @@ impl Cartridge {
 
     fn set_mbc(&mut self) {
         self.mbc = self.get_mbc();
+        self.handler = self.mbc;
     }
 
     fn set_computed(&mut self) {
@@ -377,6 +526,30 @@ impl Cartridge {
         self.title_offset = 0x0134 + offset;
     }
 
+    pub fn game_genie(&self) -> &Option<GameGenie> {
+        &self.game_genie
+    }
+
+    pub fn game_genie_mut(&mut self) -> &mut Option<GameGenie> {
+        &mut self.game_genie
+    }
+
+    pub fn set_game_genie(&mut self, game_genie: Option<GameGenie>) {
+        self.game_genie = game_genie;
+    }
+
+    pub fn game_shark(&self) -> &Option<GameShark> {
+        &self.game_shark
+    }
+
+    pub fn game_shark_mut(&mut self) -> &mut Option<GameShark> {
+        &mut self.game_shark
+    }
+
+    pub fn set_game_shark(&mut self, game_shark: Option<GameShark>) {
+        self.game_shark = game_shark;
+    }
+
     fn allocate_ram(&mut self) {
         let ram_banks = max(self.ram_size().ram_banks(), 1);
         self.ram_data = vec![0u8; ram_banks as usize * RAM_BANK_SIZE];
@@ -399,6 +572,21 @@ impl Cartridge {
             0xc0 => CgbMode::CgbOnly,
             _ => CgbMode::NoCgb,
         }
+    }
+
+    pub fn gb_mode(&self) -> GameBoyMode {
+        match self.cgb_flag() {
+            CgbMode::CgbCompatible | CgbMode::CgbOnly => GameBoyMode::Cgb,
+            _ => GameBoyMode::Dmg,
+        }
+    }
+
+    /// A cartridge is considered legacy if it does
+    /// not have a CGB flag bit (bit 7 of 0x0143) set.
+    /// These are the monochromatic only Cartridges built
+    /// for the original DMG Game Boy.
+    pub fn is_legacy(&self) -> bool {
+        self.rom_data[0x0143] & 0x80 == 0x00
     }
 
     pub fn rom_type(&self) -> RomType {
@@ -433,6 +621,40 @@ impl Cartridge {
             0xff => RomType::HuC1RamBattery,
             _ => RomType::Unknown,
         }
+    }
+
+    pub fn set_rom_type(&mut self, rom_type: RomType) {
+        self.rom_data[0x0147] = match rom_type {
+            RomType::RomOnly => 0x00,
+            RomType::Mbc1 => 0x01,
+            RomType::Mbc1Ram => 0x02,
+            RomType::Mbc1RamBattery => 0x03,
+            RomType::Mbc2 => 0x05,
+            RomType::Mbc2Battery => 0x06,
+            RomType::RomRam => 0x08,
+            RomType::RomRamBattery => 0x09,
+            RomType::Mmm01 => 0x0b,
+            RomType::Mmm01Ram => 0x0c,
+            RomType::Mmm01RamBattery => 0x0d,
+            RomType::Mbc3TimerBattery => 0x0f,
+            RomType::Mbc3TimerRamBattery => 0x10,
+            RomType::Mbc3 => 0x11,
+            RomType::Mbc3Ram => 0x12,
+            RomType::Mbc3RamBattery => 0x13,
+            RomType::Mbc5 => 0x19,
+            RomType::Mbc5Ram => 0x1a,
+            RomType::Mbc5RamBattery => 0x1b,
+            RomType::Mbc5Rumble => 0x1c,
+            RomType::Mbc5RumbleRam => 0x1d,
+            RomType::Mbc5RumbleRamBattery => 0x1e,
+            RomType::Mbc6 => 0x20,
+            RomType::Mbc7SensorRumbleRamBattery => 0x22,
+            RomType::PocketCamera => 0xfc,
+            RomType::BandaiTama5 => 0xfd,
+            RomType::HuC3 => 0xfe,
+            RomType::HuC1RamBattery => 0xff,
+            RomType::Unknown => panic!("Unknown ROM type"),
+        };
     }
 
     pub fn rom_size(&self) -> RomSize {
@@ -491,12 +713,79 @@ impl Cartridge {
         )
     }
 
+    pub fn rom_data_eager(&self) -> Vec<u8> {
+        self.rom_data.clone()
+    }
+
     pub fn ram_data_eager(&self) -> Vec<u8> {
         self.ram_data.clone()
     }
 
-    pub fn set_ram_data(&mut self, ram_data: Vec<u8>) {
-        self.ram_data = ram_data;
+    pub fn set_ram_data(&mut self, data: &[u8]) {
+        self.ram_data = data.to_vec();
+    }
+
+    pub fn clear_ram_data(&mut self) {
+        self.ram_data = vec![0u8; self.ram_data.len()];
+    }
+
+    pub fn attach_genie(&mut self, game_genie: GameGenie) {
+        self.game_genie = Some(game_genie);
+        self.handler = &GAME_GENIE;
+    }
+
+    pub fn detach_genie(&mut self) {
+        self.game_genie = None;
+        self.handler = self.mbc;
+    }
+
+    pub fn attach_shark(&mut self, game_shark: GameShark) {
+        let rom_type = self.rom_type();
+        self.game_shark = Some(game_shark);
+        self.game_shark.as_mut().unwrap().set_rom_type(rom_type);
+    }
+
+    pub fn detach_shark(&mut self) {
+        self.game_shark = None;
+    }
+
+    pub fn description(&self, column_length: usize) -> String {
+        let name_l = format!("{:width$}", "Name", width = column_length);
+        let type_l = format!("{:width$}", "Type", width = column_length);
+        let rom_size_l = format!("{:width$}", "ROM Size", width = column_length);
+        let ram_size_l = format!("{:width$}", "RAM Size", width = column_length);
+        let cgb_l = format!("{:width$}", "CGB Mode", width = column_length);
+        format!(
+            "{}  {}\n{}  {}\n{}  {}\n{}  {}\n{}  {}",
+            name_l,
+            self.title(),
+            type_l,
+            self.rom_type(),
+            rom_size_l,
+            self.rom_size(),
+            ram_size_l,
+            self.ram_size(),
+            cgb_l,
+            self.cgb_flag()
+        )
+    }
+}
+
+impl Cartridge {
+    pub fn rom_data(&self) -> &Vec<u8> {
+        &self.rom_data
+    }
+
+    pub fn rom_data_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.rom_data
+    }
+
+    pub fn ram_data(&self) -> &Vec<u8> {
+        &self.ram_data
+    }
+
+    pub fn ram_data_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.ram_data
     }
 }
 
@@ -508,15 +797,7 @@ impl Default for Cartridge {
 
 impl Display for Cartridge {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Name => {}\nType => {}\nROM Size => {}\nRAM Size => {}\nCGB Mode => {}",
-            self.title(),
-            self.rom_type(),
-            self.rom_size(),
-            self.ram_size(),
-            self.cgb_flag()
-        )
+        write!(f, "{}", self.description(9))
     }
 }
 
@@ -569,8 +850,8 @@ pub static MBC1: Mbc = Mbc {
             }
             // ROM bank selection 5 lower bits
             0x2000 | 0x3000 => {
-                let mut rom_bank = value & 0x1f;
-                rom_bank &= (rom.rom_bank_count * 2 - 1) as u8;
+                let mut rom_bank = value as u16 & 0x1f;
+                rom_bank &= rom.rom_bank_count * 2 - 1;
                 if rom_bank == 0 {
                     rom_bank = 1;
                 }
@@ -601,7 +882,7 @@ pub static MBC1: Mbc = Mbc {
     },
     write_ram: |rom: &mut Cartridge, addr: u16, value: u8| {
         if !rom.ram_enabled {
-            debugln!("Attempt to write to ERAM while write protect is active");
+            warnln!("Attempt to write to ERAM while write protect is active");
             return;
         }
         rom.ram_data[rom.ram_offset + (addr - 0xa000) as usize] = value;
@@ -631,8 +912,8 @@ pub static MBC3: Mbc = Mbc {
             }
             // ROM bank selection
             0x2000 | 0x3000 => {
-                let mut rom_bank = value & 0x7f;
-                rom_bank &= (rom.rom_bank_count * 2 - 1) as u8;
+                let mut rom_bank = value as u16 & 0x7f;
+                rom_bank &= rom.rom_bank_count * 2 - 1;
                 if rom_bank == 0 {
                     rom_bank = 1;
                 }
@@ -657,7 +938,7 @@ pub static MBC3: Mbc = Mbc {
     },
     write_ram: |rom: &mut Cartridge, addr: u16, value: u8| {
         if !rom.ram_enabled {
-            debugln!("Attempt to write to ERAM while write protect is active");
+            warnln!("Attempt to write to ERAM while write protect is active");
             return;
         }
         rom.ram_data[rom.ram_offset + (addr - 0xa000) as usize] = value;
@@ -685,17 +966,35 @@ pub static MBC5: Mbc = Mbc {
             0x0000 | 0x1000 => {
                 rom.ram_enabled = (value & 0x0f) == 0x0a;
             }
-            // ROM bank selection
+            // ROM bank selection 8 lower bits
             0x2000 => {
-                let rom_bank = value;
+                let rom_bank = value as u16;
+                rom.set_rom_bank(rom_bank);
+            }
+            // ROM bank selection 9th bit
+            0x3000 => {
+                let rom_bank = (rom.rom_bank() & 0x00ff) + (((value & 0x01) as u16) << 8);
                 rom.set_rom_bank(rom_bank);
             }
             // RAM bank selection
             0x4000 | 0x5000 => {
-                let ram_bank = value & 0x0f;
+                let mut ram_bank = value & 0x0f;
+
+                // handles the rumble flag for the cartridges
+                // that support the rumble operation
+                if rom.has_rumble() {
+                    ram_bank = value & 0x07;
+                    let rumble = (value & 0x08) == 0x08;
+                    if rom.rumble_active != rumble {
+                        rom.rumble_active = rumble;
+                        rom.trigger_rumble();
+                    }
+                }
+
                 if ram_bank as u16 >= rom.ram_bank_count {
                     return;
                 }
+
                 rom.set_ram_bank(ram_bank);
             }
             _ => warnln!("Writing to unknown Cartridge ROM location 0x{:04x}", addr),
@@ -709,9 +1008,63 @@ pub static MBC5: Mbc = Mbc {
     },
     write_ram: |rom: &mut Cartridge, addr: u16, value: u8| {
         if !rom.ram_enabled {
-            debugln!("Attempt to write to ERAM while write protect is active");
+            warnln!("Attempt to write to ERAM while write protect is active");
             return;
         }
         rom.ram_data[rom.ram_offset + (addr - 0xa000) as usize] = value;
     },
 };
+
+pub static GAME_GENIE: Mbc = Mbc {
+    name: "GameGenie",
+    read_rom: |rom: &Cartridge, addr: u16| -> u8 {
+        let game_genie = rom.game_genie.as_ref().unwrap();
+        if game_genie.contains_addr(addr) {
+            // retrieves the Game Genie code that matches the current address
+            // keep in mind that this assumes that no more that one code is
+            // registered for the same memory address
+            let genie_code = game_genie.get_addr(addr);
+
+            // obtains the current byte that is stored at the address using
+            // the MBC, this value will probably be patched
+            let data = (rom.mbc.read_rom)(rom, addr);
+
+            // checks if the current data at the address is the same as the
+            // one that is expected by the Game Genie code, if that's the case
+            // applies the patch, otherwise returns the original strategy is
+            // going to be used
+            if genie_code.is_valid(data) {
+                debugln!("Applying Game Genie code: {}", genie_code);
+                return genie_code.patch_data(data);
+            }
+        }
+        (rom.mbc.read_rom)(rom, addr)
+    },
+    write_rom: |rom: &mut Cartridge, addr: u16, value: u8| (rom.mbc.write_rom)(rom, addr, value),
+    read_ram: |rom: &Cartridge, addr: u16| -> u8 { (rom.mbc.read_ram)(rom, addr) },
+    write_ram: |rom: &mut Cartridge, addr: u16, value: u8| (rom.mbc.write_ram)(rom, addr, value),
+};
+
+#[cfg(test)]
+mod tests {
+    use super::{Cartridge, RomType};
+
+    #[test]
+    fn test_has_rumble() {
+        let mut rom = Cartridge::new();
+        rom.set_data(&vec![0; 0x8000]);
+        assert!(!rom.has_rumble());
+
+        rom.set_rom_type(RomType::Mbc5Rumble);
+        assert!(rom.has_rumble());
+
+        rom.set_rom_type(RomType::Mbc5RumbleRam);
+        assert!(rom.has_rumble());
+
+        rom.set_rom_type(RomType::Mbc5RumbleRamBattery);
+        assert!(rom.has_rumble());
+
+        rom.set_rom_type(RomType::Mbc1);
+        assert!(!rom.has_rumble());
+    }
+}

@@ -8,15 +8,17 @@ A Game Boy emulator that is written in Rust 🦀.
 
 ## Features
 
-* Game Boy (DMG) emulation
+* Game Boy (DMG) and Game Boy Color (CGB) emulation
 * Simple navigable source-code
-* Web and SDL front-ends
+* Web, [SDL](https://www.libsdl.org) and [Libretro](https://www.libretro.com) front-ends
 * Audio, with a pretty accurate APU
-* Serial Data Transfer (Link Cable) support
+* Serial Data Transfer ([Link Cable](https://en.wikipedia.org/wiki/Game_Link_Cable)) support
 * Game Boy Printer emulation
-* Support for multiple MBCs: MBC1, MBC2, MBC3, and MBC5
+* Support for multiple MBCs: MBC1, MBC3, and MBC5
+* Save state support using the [BESS Specification](https://github.com/LIJI32/SameBoy/blob/master/BESS.md) for cross-compatibility with other emulators
+* Cheat support using [Game Genie](https://en.wikipedia.org/wiki/Game_Genie) and [GameShark](https://pt.wikipedia.org/wiki/GameShark) codes
 * Variable CPU clock speed
-* Accurate PPU - passes [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) tests
+* Accurate PPU - passes [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) and [cgb-acid2](https://github.com/mattcurrie/cgb-acid2) tests
 
 For the Web front-end...
 
@@ -24,13 +26,14 @@ For the Web front-end...
 * Transparent RAM saving using [Web Storage API](https://developer.mozilla.org/docs/Web/API/Window/localStorage)
 * GamePad support using [Web Gamepad API](https://developer.mozilla.org/docs/Web/API/Gamepad_API)
 * Unobstructive and effective on-screen GamePad
+* Rumble emulation and haptic feedback
 * Cool bespoke display palettes built by [TheWolfBunny64](https://www.deviantart.com/thewolfbunny).
 * Fullscreen browser mode
 * Debug mode - VRAM and registers
 
-What's missing...
+What's still missing...
 
-* Game Boy Color (GBC) emulation
+* Machine state saving and loading (.sav files)
 
 ## Deployments
 

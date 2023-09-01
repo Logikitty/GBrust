@@ -1,7 +1,8 @@
 import {
     AudioSpecs,
+    base64ToBuffer,
     BenchmarkResult,
-    SectionInfo,
+    bufferToBase64,
     Compilation,
     Compiler,
     DebugPanel,
@@ -14,24 +15,31 @@ import {
     HelpPanel,
     PixelFormat,
     RomInfo,
+    SaveState,
+    SectionInfo,
     Size
 } from "emukit";
 import { PALETTES, PALETTES_MAP } from "./palettes";
-import { base64ToBuffer, bufferToBase64 } from "./util";
 import {
     DebugAudio,
-    DebugVideo,
+    DebugGeneral,
+    DebugSettings,
     HelpFaqs,
     HelpKeyboard,
-    SerialSection
+    SerialSection,
+    TestSection
 } from "../react";
 
 import {
     Cartridge,
     default as _wasm,
     GameBoy,
+    GameBoyMode,
+    GameBoySpeed,
+    Info,
     PadKey,
-    PpuMode
+    SaveStateFormat,
+    StateManager
 } from "../lib/boytacean";
 import info from "../package.json";
 
@@ -117,9 +125,18 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
      */
     private _engine: string | null = null;
 
-    private logicFrequency: number = LOGIC_HZ;
-    private visualFrequency: number = VISUAL_HZ;
-    private idleFrequency: number = IDLE_HZ;
+    /**
+     * If the GB running mode should be automatically inferred
+     * from the GBC flag in the cartridge. Meaning that if the
+     * cartridge is a GBC compatible or GBC only the GBC emulation
+     * mode is going to be used, otherwise the DMG mode is used
+     * instead. This should provide an optimal usage experience.
+     */
+    private autoMode = false;
+
+    private logicFrequency = LOGIC_HZ;
+    private visualFrequency = VISUAL_HZ;
+    private idleFrequency = IDLE_HZ;
 
     private paused = false;
     private nextTickTime = 0;
@@ -127,7 +144,12 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
     private frameStart: number = EmulatorBase.now();
     private frameCount = 0;
     private paletteIndex = 0;
-    private storeCycles: number = LOGIC_HZ * STORE_RATE;
+
+    /**
+     * The frequency at which the battery backed RAM is going
+     * to be flushed to the `localStorage`.
+     */
+    private flushCycles: number = LOGIC_HZ * STORE_RATE;
 
     private romName: string | null = null;
     private romData: Uint8Array | null = null;
@@ -149,6 +171,15 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
     }
 
     /**
+     * Initializes the global module structures.
+     */
+    async init() {
+        // initializes the WASM module, this is required
+        // so that the global symbols become available
+        await wasm();
+    }
+
+    /**
      * Runs the initialization and main loop execution for
      * the Game Boy emulator.
      * The main execution of this function should be an
@@ -158,10 +189,6 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
      * used in he Game Boy emulator initialization.
      */
     async main({ romUrl }: { romUrl?: string }) {
-        // initializes the WASM module, this is required
-        // so that the global symbols become available
-        await wasm();
-
         // boots the emulator subsystem with the initial
         // ROM retrieved from a remote data source
         await this.boot({ loadRom: true, romPath: romUrl ?? undefined });
@@ -190,7 +217,11 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
                 pending = this.tick(
                     currentTime,
                     pending,
-                    Math.round(this.logicFrequency / this.visualFrequency)
+                    Math.round(
+                        (this.logicFrequency *
+                            (this.gameBoy?.multiplier() ?? 1)) /
+                            this.visualFrequency
+                    )
                 );
             } catch (err) {
                 // sets the default error message to be displayed
@@ -222,11 +253,10 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
                 this.pause();
 
                 // if we're talking about a panic, proper action must be taken
-                // which in this case it means restarting both the WASM sub
+                // which in this case means restarting both the WASM sub
                 // system and the machine state (to be able to recover)
-                // also sets the default color on screen to indicate the issue
                 if (isPanic) {
-                    await wasm();
+                    await wasm(true);
                     await this.boot({ restore: false });
 
                     this.trigger("error");
@@ -259,7 +289,7 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
         // of cycles coming from the previous tick
         let counterCycles = pending;
 
-        let lastFrame = -1;
+        let lastFrame = this.gameBoy.ppu_frame();
 
         while (true) {
             // limits the number of cycles to the provided
@@ -273,13 +303,9 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
             const tickCycles = this.gameBoy.clock();
             counterCycles += tickCycles;
 
-            // in case the current PPU mode is VBlank and the
-            // frame is different from the previously rendered
-            // one then it's time to update the canvas
-            if (
-                this.gameBoy.ppu_mode() === PpuMode.VBlank &&
-                this.gameBoy.ppu_frame() !== lastFrame
-            ) {
+            // in case the frame is different from the previously
+            // rendered one then it's time to update the canvas
+            if (this.gameBoy.ppu_frame() !== lastFrame) {
                 // updates the reference to the last frame index
                 // to be used for comparison in the next tick
                 lastFrame = this.gameBoy.ppu_frame();
@@ -293,10 +319,10 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
             // then we need to check if a RAM flush to local
             // storage operation is required
             if (this.cartridge && this.cartridge.has_battery()) {
-                this.storeCycles -= tickCycles;
-                if (this.storeCycles <= 0) {
-                    this.storeRam();
-                    this.storeCycles = this.logicFrequency * STORE_RATE;
+                this.flushCycles -= tickCycles;
+                if (this.flushCycles <= 0) {
+                    this.saveRam();
+                    this.flushCycles = this.logicFrequency * STORE_RATE;
                 }
             }
         }
@@ -355,7 +381,7 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
      * the emulator engine to use.
      */
     async boot({
-        engine = "neo",
+        engine = "auto",
         restore = true,
         loadRom = false,
         romPath = ROM_PATH,
@@ -372,9 +398,8 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
         // in case a remote ROM loading operation has been
         // requested then loads it from the remote origin
         if (loadRom) {
-            ({ name: romName, data: romData } = await GameboyEmulator.fetchRom(
-                romPath
-            ));
+            ({ name: romName, data: romData } =
+                await GameboyEmulator.fetchRom(romPath));
         } else if (romName === null || romData === null) {
             [romName, romData] = [this.romName, this.romData];
         }
@@ -388,8 +413,17 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
         // selects the proper engine for execution
         // and builds a new instance of it
         switch (engine) {
-            case "neo":
-                this.gameBoy = new GameBoy();
+            case "auto":
+                this.gameBoy = new GameBoy(GameBoyMode.Dmg);
+                this.autoMode = true;
+                break;
+            case "cgb":
+                this.gameBoy = new GameBoy(GameBoyMode.Cgb);
+                this.autoMode = false;
+                break;
+            case "dmg":
+                this.gameBoy = new GameBoy(GameBoyMode.Dmg);
+                this.autoMode = false;
                 break;
             default:
                 if (!this.gameBoy) {
@@ -403,11 +437,26 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
         // selected one
         this.updatePalette();
 
+        // in case the auto emulation mode is enabled runs the
+        // inference logic to try to infer the best mode from the
+        // GBC header in the cartridge data
+        if (this.autoMode) {
+            this.gameBoy.infer_mode_ws(romData);
+        }
+
         // resets the Game Boy engine to restore it into
         // a valid state ready to be used
         this.gameBoy.reset();
-        this.gameBoy.load_boot_default();
+        this.gameBoy.load(true);
+
+        // loads the ROM file into the system and retrieves
+        // the cartridge instance associated with it
         const cartridge = this.gameBoy.load_rom_ws(romData);
+
+        // loads the callbacks so that the Typescript code
+        // gets notified about the various events triggered
+        // in the WASM side
+        this.gameBoy.load_callbacks_ws();
 
         // in case there's a serial device involved tries to load
         // it and initialize for the current Game Boy machine
@@ -445,13 +494,17 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
         this.cartridge = cartridge;
     }
 
+    get instance(): GameBoy | null {
+        return this.gameBoy;
+    }
+
     get name(): string {
-        return "Boytacean";
+        return Info.name() ?? info.name;
     }
 
     get device(): Entry {
         return {
-            text: "Game Boy",
+            text: Info.system(),
             url: "https://en.wikipedia.org/wiki/Game_Boy"
         };
     }
@@ -462,7 +515,7 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
 
     get version(): Entry | undefined {
         return {
-            text: info.version,
+            text: Info.version() ?? info.version,
             url: "https://github.com/joamag/boytacean/blob/master/CHANGELOG.md"
         };
     }
@@ -483,7 +536,8 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
             Feature.Benchmark,
             Feature.Keyboard,
             Feature.KeyboardGB,
-            Feature.RomTypeInfo
+            Feature.RomTypeInfo,
+            Feature.SaveState
         ];
     }
 
@@ -492,9 +546,11 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
             {
                 name: "Serial",
                 icon: require("../res/serial.svg"),
-                node: SerialSection({
-                    emulator: this
-                })
+                node: SerialSection({ emulator: this })
+            },
+            {
+                name: "Test",
+                node: TestSection({})
             }
         ];
     }
@@ -515,22 +571,26 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
     get debug(): DebugPanel[] {
         return [
             {
-                name: "Video",
-                node: DebugVideo({ emulator: this })
+                name: "General",
+                node: DebugGeneral({ emulator: this })
             },
             {
                 name: "Audio",
                 node: DebugAudio({ emulator: this })
+            },
+            {
+                name: "Settings",
+                node: DebugSettings({ emulator: this })
             }
         ];
     }
 
     get engines(): string[] {
-        return ["neo"];
+        return ["auto", "cgb", "dmg"];
     }
 
     get engine(): string {
-        return this._engine || "neo";
+        return this._engine || "auto";
     }
 
     get romExts(): string[] {
@@ -561,8 +621,8 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
 
     get audioSpecs(): AudioSpecs {
         return {
-            samplingRate: 44100,
-            channels: 2
+            samplingRate: this.gameBoy?.audio_sampling_rate() ?? 44100,
+            channels: this.gameBoy?.audio_channels() ?? 2
         };
     }
 
@@ -612,16 +672,16 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
     get compiler(): Compiler | null {
         if (!this.gameBoy) return null;
         return {
-            name: this.gameBoy.compiler(),
-            version: this.gameBoy.compiler_version()
+            name: Info.compiler(),
+            version: Info.compiler_version()
         };
     }
 
     get compilation(): Compilation | null {
         if (!this.gameBoy) return null;
         return {
-            date: this.gameBoy.compilation_date(),
-            time: this.gameBoy.compilation_time()
+            date: Info.compilation_date(),
+            time: Info.compilation_time()
         };
     }
 
@@ -654,6 +714,10 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
             ly: registers.ly,
             lyc: registers.lyc
         };
+    }
+
+    get speed(): GameBoySpeed {
+        return this.gameBoy?.speed() ?? GameBoySpeed.Normal;
     }
 
     get audioOutput(): Record<string, number> {
@@ -721,6 +785,27 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
         this.gameBoy?.key_lift(keyCode);
     }
 
+    serializeState(): Uint8Array {
+        if (!this.gameBoy) throw new Error("Unable to serialize state");
+        return StateManager.save(this.gameBoy, SaveStateFormat.Bos);
+    }
+
+    unserializeState(data: Uint8Array) {
+        if (!this.gameBoy) throw new Error("Unable to unserialize state");
+        StateManager.load(data, this.gameBoy, SaveStateFormat.Bos);
+    }
+
+    buildState(index: number, data: Uint8Array): SaveState {
+        const state = StateManager.read_bos(data);
+        return {
+            index: index,
+            timestamp: Number(state.timestamp()),
+            agent: state.agent(),
+            model: state.model(),
+            thumbnail: state.image_eager()
+        };
+    }
+
     pauseVideo() {
         this.gameBoy?.set_ppu_enabled(false);
     }
@@ -735,10 +820,12 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
 
     pauseAudio() {
         this.gameBoy?.set_apu_enabled(false);
+        this.trigger("audio-state", { state: "paused", stateBool: false });
     }
 
     resumeAudio() {
         this.gameBoy?.set_apu_enabled(true);
+        this.trigger("audio-state", { state: "resumed", stateBool: true });
     }
 
     getAudioState(): boolean {
@@ -814,12 +901,29 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
         if (set) this.serialDevice = SerialDevice.Printer;
     }
 
+    onSpeedSwitch(speed: GameBoySpeed) {
+        this.trigger("speed", { data: speed });
+    }
+
     onLoggerDevice(data: Uint8Array) {
         this.trigger("logger", { data: data });
     }
 
     onPrinterDevice(imageBuffer: Uint8Array) {
         this.trigger("printer", { imageBuffer: imageBuffer });
+    }
+
+    /**
+     * Tries for save/flush the current machine RAM into the
+     * `localStorage`, so that it can be latter restored.
+     */
+    private saveRam() {
+        if (!this.gameBoy || !this.cartridge || !window.localStorage) return;
+        if (!this.cartridge.has_battery()) return;
+        const title = this.cartridge.title();
+        const ramData = this.gameBoy.ram_data_eager();
+        const ramDataB64 = bufferToBase64(ramData);
+        localStorage.setItem(title, ramDataB64);
     }
 
     /**
@@ -833,18 +937,6 @@ export class GameboyEmulator extends EmulatorBase implements Emulator {
         if (!ramDataB64) return;
         const ramData = base64ToBuffer(ramDataB64);
         this.gameBoy.set_ram_data(ramData);
-    }
-
-    /**
-     * Tries for store/flush the current machine RAM into the
-     * `localStorage`, so that it can be latter restored.
-     */
-    private storeRam() {
-        if (!this.gameBoy || !this.cartridge || !window.localStorage) return;
-        const title = this.cartridge.title();
-        const ramData = this.gameBoy.ram_data_eager();
-        const ramDataB64 = bufferToBase64(ramData);
-        localStorage.setItem(title, ramDataB64);
     }
 
     private storeSettings() {
@@ -892,8 +984,10 @@ declare global {
     interface Window {
         emulator: GameboyEmulator;
         panic: (message: string) => void;
+        speedCallback: (speed: GameBoySpeed) => void;
         loggerCallback: (data: Uint8Array) => void;
         printerCallback: (imageBuffer: Uint8Array) => void;
+        rumbleCallback: (active: boolean) => void;
     }
 
     interface Console {
@@ -905,6 +999,10 @@ window.panic = (message: string) => {
     console.error(message);
 };
 
+window.speedCallback = (speed: GameBoySpeed) => {
+    window.emulator.onSpeedSwitch(speed);
+};
+
 window.loggerCallback = (data: Uint8Array) => {
     window.emulator.onLoggerDevice(data);
 };
@@ -913,12 +1011,47 @@ window.printerCallback = (imageBuffer: Uint8Array) => {
     window.emulator.onPrinterDevice(imageBuffer);
 };
 
+window.rumbleCallback = (active: boolean) => {
+    if (!active) return;
+
+    // runs the vibration actuator on the current window
+    // this will probably affect only mobile devices
+    window?.navigator?.vibrate?.(250);
+
+    // iterates over all the available gamepads to run
+    // the vibration actuator on each of them
+    let gamepadIndex = 0;
+    while (true) {
+        const gamepad = navigator.getGamepads()[gamepadIndex];
+        if (!gamepad) break;
+        gamepad?.vibrationActuator?.playEffect?.("dual-rumble", {
+            startDelay: 0,
+            duration: 150,
+            weakMagnitude: 0.8,
+            strongMagnitude: 0.0
+        });
+        gamepadIndex++;
+    }
+};
+
 console.image = (url: string, size = 80) => {
     const style = `font-size: ${size}px; background-image: url("${url}"); background-size: contain; background-repeat: no-repeat;`;
     console.log("%c     ", style);
 };
 
-const wasm = async () => {
+const wasm = async (setHook = true) => {
     await _wasm();
-    GameBoy.set_panic_hook_ws();
+
+    // in case the set hook flag is set, then tries to
+    // set the panic hook for the WASM module, this call
+    // may fail in some versions of wasm-bindgen as the
+    // thread is still marked as "panicking", so we need to
+    // wrap the call around try/catch
+    if (setHook) {
+        try {
+            GameBoy.set_panic_hook_ws();
+        } catch (err) {
+            console.error(err);
+        }
+    }
 };

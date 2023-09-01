@@ -3,10 +3,10 @@ use sdl2::{
     AudioSubsystem, EventPump, Sdl, TimerSubsystem, VideoSubsystem,
 };
 
-/// Structure that provides the complete set of Graphics
+/// Structure that provides the complete set of SDL Graphics
 /// and Sound syb-system ready to be used by the overall
 /// emulator infrastructure.
-pub struct Graphics {
+pub struct SdlSystem {
     pub canvas: Canvas<Window>,
     pub video_subsystem: VideoSubsystem,
     pub timer_subsystem: TimerSubsystem,
@@ -15,7 +15,7 @@ pub struct Graphics {
     pub ttf_context: Sdl2TtfContext,
 }
 
-impl Graphics {
+impl SdlSystem {
     /// Start the SDL sub-system and all of its structure and returns
     /// a structure with all the needed stuff to handle SDL graphics
     /// and sound.
@@ -42,7 +42,11 @@ impl Graphics {
         // creates the system window that is going to be used to
         // show the emulator and sets it to the central are o screen
         let window = video_subsystem
-            .window(title, scale as u32 * width, scale as u32 * height)
+            .window(
+                title,
+                (scale * width as f32) as u32,
+                (scale * height as f32) as u32,
+            )
             .resizable()
             .position_centered()
             .opengl()

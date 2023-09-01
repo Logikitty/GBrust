@@ -312,6 +312,14 @@ impl SerialDevice for PrinterDevice {
     fn allow_slave(&self) -> bool {
         false
     }
+
+    fn description(&self) -> String {
+        format!("Printer [{}]", self.command)
+    }
+
+    fn state(&self) -> String {
+        self.command.to_string()
+    }
 }
 
 impl Default for PrinterDevice {

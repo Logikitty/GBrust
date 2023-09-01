@@ -1,7 +1,7 @@
 [package]
 name = "boytacean"
 description = "A Game Boy emulator that is written in Rust."
-version = "0.8.0"
+version = "0.9.14"
 authors = ["João Magalhães <joamag@gmail.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/joamag/boytacean"
@@ -15,12 +15,15 @@ readme = "README.md"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-wasm = ["wasm-bindgen"]
+wasm = ["wasm-bindgen", "js-sys"]
 debug = []
+pedantic = []
+cpulog = []
 gen-mock = []
 
 [dependencies]
 wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
 
 [build-dependencies]
 chrono = "0.4"
@@ -31,12 +34,16 @@ built = "0.5"
 debug = false
 lto = true
 opt-level = 3
+codegen-units = 1
+
+[profile.release-safe]
+inherits = "release"
+debug = false
+lto = true
+opt-level = 3
 
 [workspace]
-members = [
-    ".",
-    "frontends/sdl",
-]
+members = [".", "frontends/libretro", "frontends/sdl"]
 
 [package.metadata.docs.rs]
 features = ["wasm", "gen-mock"]
